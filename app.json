@@ -1,0 +1,1 @@
+{"edition":"202601","entrypoint":"index.html","min_app_version":"2.0.0","min_sdk_version":"0.0.10","name":"GlanceNotes","package_id":"com.jinan.glancenotes","permissions":[{"desc":"GlanceNotes fetches your Notion tasks and answers from its local companion backend.","name":"network","whitelist":["http://localhost:3001"]}],"supported_languages":["en"],"version":"0.1.0"}
