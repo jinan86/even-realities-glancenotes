@@ -5,14 +5,14 @@
 //   NOTION_TOKEN       integration token (server-side only, never in repo)
 //   NOTION_TASKS_DB_ID the "Tasks" database id shared with the integration
 //
-// NOT YET VERIFIED against zee's workspace: the token had not been
-// provided when this adapter was written (23 Nov 2026), so it was built
-// from the Notion API docs and tested only for import/startup. Property
-// reading is tolerant on purpose: zee's "Tasks" database column names
-// were not visible without the token, so title/status/due are picked from
-// the first property of the matching type instead of a hardcoded name.
-// First live run must check GET /api/tasks output and fix the mapping
-// if the columns differ.
+// VERIFIED against zee's workspace 23 Nov 2026 (live run, token via Secure
+// Vault surrogate): Tasks database 421447dd-5e2c-807c-af4b-d510581ee8ff has
+// columns Nama (title), Status (status: "Belum dimulai" / "Sedang
+// berlangsung" / "Selesai" — "Selesai" is the Complete group), Due date
+// (date). Status is normalized to 'open'/'done' for the G2 UI; the done
+// option name is discovered from the database schema at markDone time,
+// never hardcoded. Sorting falls back to unsorted when the date column
+// name differs from the guess.
 //
 // The token is used ONLY here, server-side. It is never sent to the
 // glasses app, the companion page, or any LLM provider.
@@ -35,11 +35,15 @@ function readTitle(page) {
   return found ? plainText(found.prop.title) : '(untitled)';
 }
 
+function isDoneStatus(name) {
+  return /^(selesai|done|complete|completed)$/i.test(String(name || '').trim());
+}
+
 function readStatus(page) {
   const status = firstPropOf(page, 'status');
-  if (status) return String(status.prop.status?.name || 'open').toLowerCase();
+  if (status) return isDoneStatus(status.prop.status?.name) ? 'done' : 'open';
   const select = firstPropOf(page, 'select');
-  if (select) return String(select.prop.select?.name || 'open').toLowerCase();
+  if (select) return isDoneStatus(select.prop.select?.name) ? 'done' : 'open';
   const checkbox = firstPropOf(page, 'checkbox');
   if (checkbox) return checkbox.prop.checkbox ? 'done' : 'open';
   return 'open';
@@ -72,8 +76,11 @@ export function createLiveAdapter({ token, tasksDbId }) {
         database_id: tasksDbId,
         sorts: [{ property: 'Due', direction: 'ascending' }],
       }).catch(async (err) => {
-        // 'Due' may not be the date column name; retry without sorting.
-        if (String(err?.message || '').includes('not a property')) {
+        // 'Due' may not be the date column name (zee's is "Due date");
+        // Notion reports that as "Could not find sort property...".
+        // Retry without sorting.
+        const msg = String(err?.message || '');
+        if (msg.includes('Could not find sort property') || msg.includes('not a property')) {
           return notion.databases.query({ database_id: tasksDbId });
         }
         throw err;
@@ -126,9 +133,27 @@ export function createLiveAdapter({ token, tasksDbId }) {
       const page = await notion.pages.retrieve({ page_id: id });
       const status = firstPropOf(page, 'status');
       if (status) {
+        // The done option name comes from the database schema, not a guess:
+        // zee's DB uses "Selesai" (Complete group). Pick the option in the
+        // "Complete" group, else a name matching done-words, else fail loudly.
+        const db = await notion.databases.retrieve({ database_id: tasksDbId });
+        const statusProp = Object.values(db.properties || {}).find((p) => p.type === 'status');
+        const options = statusProp?.status?.options || [];
+        const groups = statusProp?.status?.groups || [];
+        const completeGroup = groups.find((g) => /^complete$/i.test(g.name || ''));
+        let doneName = null;
+        if (completeGroup) {
+          const opt = options.find((o) => completeGroup.option_ids?.includes(o.id));
+          if (opt) doneName = opt.name;
+        }
+        if (!doneName) {
+          const opt = options.find((o) => isDoneStatus(o.name));
+          if (opt) doneName = opt.name;
+        }
+        if (!doneName) throw new Error('Tasks database has no Complete status option');
         await notion.pages.update({
           page_id: id,
-          properties: { [status.name]: { status: { name: 'Done' } } },
+          properties: { [status.name]: { status: { name: doneName } } },
         });
       } else {
         const select = firstPropOf(page, 'select');
